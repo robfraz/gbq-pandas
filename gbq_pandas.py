@@ -1,4 +1,5 @@
 # Standard library imports
+import os
 from tempfile import NamedTemporaryFile
 from uuid import uuid4
 from itertools import islice
@@ -25,16 +26,26 @@ def df_to_table(df,
         google.cloud.bigquery.Job: The file upload job object.  If you have set
             blocking=False, this can be used to check for job completion.
     """
-    with NamedTemporaryFile(mode='w',
-                            encoding='UTF-8',
-                            prefix="df_to_table_",
-                            suffix=".csv") as writebuf:
+    # Two annoyances here:
+    # 1) df.to_csv() requires a non binary mode file handle, whereas
+    # table.upload_from_file() requires a binary mode file handle, so
+    # we can't reuse the same file handle in read/write mode.
+    # 2) Windows won't allow reading from a temporary file whilst it's
+    # still open (see Issue #2 on this repo), so we can't use context
+    # handlers to auto-close (and therefore delete) the temporary file
+    # that we write to.
+
+    writebuf = NamedTemporaryFile(mode='w',
+                                  encoding='UTF-8',
+                                  prefix="df_to_table_",
+                                  suffix=".csv",
+                                  delete=False)  # See Issue #2
+
+    try:
         df.to_csv(writebuf, index=False, encoding='UTF-8')
         writebuf.flush()
+        writebuf.close()
 
-        # Annoyingly, df.to_csv above requires a non binary mode file handle,
-        # whereas table.upload_from_file below requires a binary mode file
-        # handle, so we end up with nested context handlers.
         with open(writebuf.name, mode='rb') as readbuf:
             job = table.upload_from_file(readbuf,
                                          encoding='UTF-8',
@@ -42,6 +53,8 @@ def df_to_table(df,
                                          skip_leading_rows=1,
                                          create_disposition='CREATE_IF_NEEDED',
                                          write_disposition=write_disposition)
+    finally:
+        os.remove(writebuf.name)
 
     if blocking:
         job.result()
